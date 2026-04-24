@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Better DeepSeek",
+  "version": "1.0.0",
+  "description": "Add Agents feature to chat.deepseek.com",
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "96": "icons/icon96.png",
+      "128": "icons/icon128.png",
+      "256": "icons/icon256.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "96": "icons/icon96.png",
+    "128": "icons/icon128.png",
+    "256": "icons/icon256.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://chat.deepseek.com/*"],
+      "js": ["src/content.tsx"],
+      "run_at": "document_end"
+    }
+  ],
+  "permissions": ["storage"],
+  "host_permissions": ["*://chat.deepseek.com/*"]
+}
