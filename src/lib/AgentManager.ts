@@ -49,7 +49,6 @@ export class AgentManager {
   private filterRAF = 0;
   private isAutoFilling = false;
 
-  // Cached references to avoid repeated DOM queries
   private sidebarContainer: HTMLElement | null = null;
   private cachedLinks: HTMLElement[] = [];
   private cachedGroups: HTMLElement[] = [];
@@ -73,9 +72,60 @@ export class AgentManager {
       this.filterDirty = true;
       this.scheduleFilterHistory();
     });
+    this.interceptFetch();
     this.interceptHistory();
     this.observeSidebar();
     this.handleUrlChange();
+  }
+
+  /**
+   * Intercept DeepSeek's fetch_page API to filter sessions at the source.
+   * When agent mode is active: only return sessions belonging to that agent.
+   * When no agent: exclude sessions belonging to any agent.
+   * This prevents DeepSeek from rendering hundreds of irrelevant DOM nodes.
+   */
+  private interceptFetch() {
+    const originalFetch = window.fetch.bind(window);
+
+    window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+      const response = await originalFetch(...args);
+      const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url;
+
+      if (!url?.includes('chat_session/fetch_page')) {
+        return response;
+      }
+
+      const { activeAgentId, sessions } = this.localState;
+      if (!activeAgentId && Object.keys(sessions).length === 0) {
+        return response;
+      }
+
+      try {
+        const json = await response.json();
+        const bizData = json.data?.biz_data;
+        if (!bizData?.chat_sessions) return new Response(JSON.stringify(json), { status: response.status, headers: response.headers });
+
+        const allAgentSessionIds = new Set(Object.keys(sessions));
+
+        if (activeAgentId) {
+          const agentSessionIds = new Set<string>();
+          for (const [sId, aId] of Object.entries(sessions)) {
+            if (aId === activeAgentId) agentSessionIds.add(sId);
+          }
+          bizData.chat_sessions = bizData.chat_sessions.filter(
+            (s: { id: string }) => agentSessionIds.has(s.id)
+          );
+        } else {
+          bizData.chat_sessions = bizData.chat_sessions.filter(
+            (s: { id: string }) => !allAgentSessionIds.has(s.id)
+          );
+        }
+
+        return new Response(JSON.stringify(json), { status: response.status, headers: response.headers });
+      } catch {
+        return response;
+      }
+    };
   }
 
   private interceptHistory() {
@@ -254,14 +304,8 @@ export class AgentManager {
     }
   }
 
-  /**
-   * Find and observe only the sidebar history container.
-   * This avoids reacting to DOM changes in the chat area (streaming, typing, etc.)
-   */
   private observeSidebar() {
-    // Try to find the sidebar container that holds history links
     const findContainer = (): HTMLElement | null => {
-      // Walk up from any history link to find the scrollable sidebar root
       const link = document.querySelector('a[href*="/a/chat/s/"]');
       if (!link) return null;
       let el = link.parentElement;
@@ -271,14 +315,12 @@ export class AgentManager {
         }
         el = el.parentElement;
       }
-      // Fallback: use the parent that contains all history links
       return link.closest('nav') || link.parentElement?.parentElement || null;
     };
 
     const startObserving = (container: HTMLElement) => {
       this.sidebarContainer = container;
       this.sidebarObserver = new MutationObserver((mutations) => {
-        // Only care about structural changes to the history list
         for (const m of mutations) {
           if (m.type === 'childList' && m.addedNodes.length > 0) {
             this.filterDirty = true;
@@ -296,7 +338,6 @@ export class AgentManager {
     if (container) {
       startObserving(container);
     } else {
-      // Sidebar not loaded yet — watch body briefly until we find it
       const tempMo = new MutationObserver(() => {
         const container = findContainer();
         if (container) {
@@ -322,7 +363,6 @@ export class AgentManager {
   private resolveCachedLinks() {
     if (!this.filterDirty) return;
 
-    // Use sidebar container as scope to limit query range
     const scope = this.sidebarContainer || document.body;
     const links = scope.querySelectorAll('a[href*="/a/chat/s/"]');
 
@@ -342,6 +382,11 @@ export class AgentManager {
     this.filterDirty = false;
   }
 
+  /**
+   * CSS-level filter as a safety net for edge cases the API interceptor misses
+   * (e.g., sessions added after initial load, race conditions).
+   * With the API interceptor active, this typically has very little to do.
+   */
   public filterHistoryDOM() {
     const { activeAgentId, sessions } = this.localState;
 
@@ -367,7 +412,6 @@ export class AgentManager {
         ? currentAgentSessionIds.has(sessionId)
         : !allAgentSessionIds.has(sessionId);
 
-      // Only write DOM if state actually changed
       const isCurrentlyHidden = link.style.display === 'none';
       if (isVisible === isCurrentlyHidden) {
         link.style.display = isVisible ? '' : 'none';
