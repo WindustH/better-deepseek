@@ -29,10 +29,7 @@ export class AgentManager {
   private async init() {
     try {
       this.localState = await loadState();
-    } catch (e) {
-      // Extension context invalidated — content script from a previous
-      // extension version, nothing to do.
-      console.log('[AgentManager] init failed, extension context likely invalidated');
+    } catch {
       return;
     }
     subscribeToState((newState) => {
@@ -67,15 +64,8 @@ export class AgentManager {
       checkUrl();
     };
 
-    // Poll for URL changes as a fallback — DeepSeek's SPA router sometimes
-    // navigates without touching history.pushState/replaceState.
-    const pollUrl = () => {
-      if (this.currentUrl !== location.href) {
-        this.currentUrl = location.href;
-        this.handleUrlChange();
-      }
-    };
-    setInterval(pollUrl, 250);
+    // Fallback — DeepSeek's SPA sometimes navigates without touching history API.
+    setInterval(checkUrl, 1500);
   }
 
   private async handleUrlChange() {
@@ -86,14 +76,10 @@ export class AgentManager {
     if (isNewChat) {
       if (this.localState.activeAgentId) {
         const agent = this.localState.agents.find(a => a.id === this.localState.activeAgentId);
-        if (agent) {
-          this.autoFillAndSend(agent);
-        }
+        if (agent) this.autoFillAndSend(agent);
       }
     } else if (sessionId && this.localState.activeAgentId) {
       if (this.localState.sessions[sessionId] !== this.localState.activeAgentId) {
-        // Update local state synchronously so filterHistoryDOM sees the new
-        // session immediately — prevents a flash where all links are hidden.
         this.localState.sessions[sessionId] = this.localState.activeAgentId;
         this.filterDirty = true;
         this.scheduleFilterHistory();
@@ -111,7 +97,6 @@ export class AgentManager {
 
   private clickNewChatOrRedirect() {
     if (location.pathname === '/') return;
-    // Prefer clicking DeepSeek's own button so sidebar state is preserved.
     const newChatBtn = document.evaluate(
       '//div[contains(text(), "开启新对话") or contains(text(), "New chat")]',
       document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
@@ -138,11 +123,7 @@ export class AgentManager {
       return;
     }
 
-    // Clear any stale state from a previous session, then wait for the DOM to
-    // settle before auto-filling.
     this.clearInputArea();
-    await new Promise(r => requestAnimationFrame(r));
-    await new Promise(r => requestAnimationFrame(r));
 
     const agent = this.localState.agents.find(a => a.id === agentId);
     if (agent) this.autoFillAndSend(agent);
@@ -161,6 +142,17 @@ export class AgentManager {
     this.scheduleFilterHistory();
   }
 
+  private getInputWrapper(textarea: HTMLElement): HTMLElement | null {
+    let el: HTMLElement | null = textarea;
+    for (let i = 0; el && i < 3; i++) el = el.parentElement;
+    return el;
+  }
+
+  private getFileArea(wrapper: HTMLElement, textarea: HTMLElement): HTMLElement | null {
+    const firstChild = wrapper.firstElementChild as HTMLElement | null;
+    return (firstChild && !firstChild.contains(textarea)) ? firstChild : null;
+  }
+
   private clearInputArea() {
     const textarea = document.querySelector<HTMLTextAreaElement>('textarea');
     if (textarea) {
@@ -171,17 +163,10 @@ export class AgentManager {
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    // Walk up 3 levels to the input wrapper.
-    // The file area is the dynamic firstChild — only present when files exist.
-    // When no files: firstChild is the input container (contains textarea).
-    let el: HTMLElement | null = textarea ?? null;
-    for (let i = 0; el && i < 3; i++) {
-      el = el.parentElement;
-    }
-    const firstChild = el?.firstElementChild as HTMLElement | null;
-    // Only target the file area (firstChild that does NOT contain the textarea)
-    if (firstChild && textarea && !firstChild.contains(textarea)) {
-      firstChild.querySelectorAll<HTMLElement>('[tabindex="0"]').forEach(e => e.click());
+    const wrapper = textarea ? this.getInputWrapper(textarea) : null;
+    const fileArea = wrapper && textarea ? this.getFileArea(wrapper, textarea) : null;
+    if (fileArea) {
+      fileArea.querySelectorAll<HTMLElement>('[tabindex="0"]').forEach(e => e.click());
     }
   }
 
@@ -214,21 +199,12 @@ export class AgentManager {
       const dataTransfer = new DataTransfer();
       let addedFiles = 0;
 
-      // Walk up 3 levels to the input wrapper.
-      let wrapper: HTMLElement | null = textarea;
-      for (let i = 0; wrapper && i < 3; i++) {
-        wrapper = wrapper.parentElement;
-      }
-      // The file area is the dynamic firstChild — only present when files exist.
-      const firstChild = wrapper?.firstElementChild as HTMLElement | null;
-      const fileArea = (firstChild && !firstChild.contains(textarea)) ? firstChild : null;
+      const wrapper = this.getInputWrapper(textarea);
+      const fileArea = wrapper ? this.getFileArea(wrapper, textarea) : null;
       const scopeText = fileArea?.textContent || '';
 
       for (const fileData of files) {
-        if (scopeText.includes(fileData.name)) {
-          console.log(`File ${fileData.name} seems already attached, skipping.`);
-          continue;
-        }
+        if (scopeText.includes(fileData.name)) continue;
         const res = await fetch(fileData.dataURL);
         const blob = await res.blob();
         const file = new File([blob], fileData.name, { type: fileData.type });
@@ -237,14 +213,12 @@ export class AgentManager {
       }
 
       if (addedFiles > 0) {
-        // Drop on the file area if present, otherwise on the wrapper itself.
         const dropTarget = fileArea || wrapper || document.body;
-        const dropEvent = new DragEvent('drop', {
+        dropTarget.dispatchEvent(new DragEvent('drop', {
           bubbles: true,
           cancelable: true,
-          dataTransfer: dataTransfer
-        });
-        dropTarget.dispatchEvent(dropEvent);
+          dataTransfer
+        }));
       }
     } catch (e) {
       console.error('Failed to attach files:', e);
@@ -252,13 +226,11 @@ export class AgentManager {
   }
 
   private async injectPrompt(textarea: HTMLTextAreaElement, agent: Agent) {
-    const finalPrompt = agent.prompt || '';
-
-    if (finalPrompt) {
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-      nativeInputValueSetter?.call(textarea, finalPrompt);
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+    const prompt = agent.prompt || '';
+    if (!prompt) return;
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+    nativeSetter?.call(textarea, prompt);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   private observeSidebar() {
@@ -284,9 +256,7 @@ export class AgentManager {
             break;
           }
         }
-        if (this.filterDirty) {
-          this.scheduleFilterHistory();
-        }
+        if (this.filterDirty) this.scheduleFilterHistory();
       });
       this.sidebarObserver.observe(container, { childList: true, subtree: true });
     };
@@ -296,10 +266,10 @@ export class AgentManager {
       startObserving(container);
     } else {
       const tempMo = new MutationObserver(() => {
-        const container = findContainer();
-        if (container) {
+        const c = findContainer();
+        if (c) {
           tempMo.disconnect();
-          startObserving(container);
+          startObserving(c);
           this.filterDirty = true;
           this.scheduleFilterHistory();
         }
@@ -322,13 +292,11 @@ export class AgentManager {
 
     const scope = this.sidebarContainer || document.body;
     const links = scope.querySelectorAll('a[href*="/a/chat/s/"]');
-
     this.cachedLinks = [];
     this.cachedGroups.clear();
 
     for (const link of links) {
       this.cachedLinks.push(link as HTMLElement);
-
       const parent = link.parentElement;
       if (parent && parent.children.length > 1) {
         this.cachedGroups.add(parent);
@@ -338,43 +306,36 @@ export class AgentManager {
     this.filterDirty = false;
   }
 
-  /**
-   * CSS-level filter as a safety net for edge cases the API interceptor misses
-   * (e.g., sessions added after initial load, race conditions).
-   * With the API interceptor active, this typically has very little to do.
-   */
   public filterHistoryDOM() {
     const { activeAgentId, sessions } = this.localState;
 
     this.resolveCachedLinks();
     if (this.cachedLinks.length === 0) return;
 
-    const allAgentSessionIds = new Set(Object.keys(sessions));
+    const allAgentSessionIds = new Set<string>();
     const currentAgentSessionIds = new Set<string>();
-    if (activeAgentId) {
-      for (const [sId, aId] of Object.entries(sessions)) {
-        if (aId === activeAgentId) currentAgentSessionIds.add(sId);
-      }
+    for (const [sId, aId] of Object.entries(sessions)) {
+      allAgentSessionIds.add(sId);
+      if (aId === activeAgentId) currentAgentSessionIds.add(sId);
     }
 
     const groupVisibleCounts = new Map<HTMLElement, number>();
 
     for (const link of this.cachedLinks) {
-      const match = link.getAttribute('href')?.match(/\/a\/chat\/s\/([a-zA-Z0-9-]+)/);
-      const sessionId = match?.[1];
+      const sessionId = link.getAttribute('href')?.match(/\/a\/chat\/s\/([a-zA-Z0-9-]+)/)?.[1];
       if (!sessionId) continue;
 
-      const isVisible = activeAgentId
-        ? currentAgentSessionIds.has(sessionId)
-        : !allAgentSessionIds.has(sessionId);
+      const shouldHide = activeAgentId
+        ? !currentAgentSessionIds.has(sessionId)
+        : allAgentSessionIds.has(sessionId);
 
-      const isCurrentlyHidden = link.style.display === 'none';
-      if (isVisible === isCurrentlyHidden) {
-        link.style.display = isVisible ? '' : 'none';
-        link.classList.toggle('agent-hidden', !isVisible);
+      const currentlyHidden = link.style.display === 'none';
+      if (shouldHide !== currentlyHidden) {
+        link.style.display = shouldHide ? 'none' : '';
+        link.classList.toggle('agent-hidden', shouldHide);
       }
 
-      if (isVisible) {
+      if (!shouldHide) {
         const parent = link.parentElement;
         if (parent && this.cachedGroups.has(parent)) {
           groupVisibleCounts.set(parent, (groupVisibleCounts.get(parent) || 0) + 1);

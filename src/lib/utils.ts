@@ -7,32 +7,22 @@ export const waitForElement = <T extends HTMLElement>(
   if (el && (!predicate || predicate(el))) return Promise.resolve(el);
 
   return new Promise((resolve) => {
-    const deadline = Date.now() + timeout;
-    let resolved = false;
+    let done = false;
 
-    const check = () => {
-      if (resolved) return;
+    const finish = (result: T | null) => {
+      if (done) return;
+      done = true;
+      mo.disconnect();
+      resolve(result);
+    };
+
+    const mo = new MutationObserver(() => {
       const el = document.querySelector<T>(selector);
-      if (el && (!predicate || predicate(el))) {
-        resolved = true;
-        mo.disconnect();
-        resolve(el);
-      } else if (Date.now() > deadline) {
-        resolved = true;
-        mo.disconnect();
-        resolve(null);
-      }
-    };
+      if (el && (!predicate || predicate(el))) finish(el);
+    });
 
-    const mo = new MutationObserver(check);
     mo.observe(document.body, { childList: true, subtree: true, attributes: true });
-
-    const poll = () => {
-      if (resolved) return;
-      check();
-      if (!resolved) requestAnimationFrame(poll);
-    };
-    requestAnimationFrame(poll);
+    setTimeout(() => finish(null), timeout);
   });
 };
 
