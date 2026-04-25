@@ -12,8 +12,14 @@ export interface AgentFile {
   dataURL: string;
 }
 
+export interface TogglePreferences {
+  smartSearch: boolean;
+  fastMode: boolean;
+}
+
 export interface AppState {
   agents: Agent[];
   sessions: Record<string, string>; // sessionId -> agentId
   activeAgentId: string | null;
+  togglePrefs?: TogglePreferences;
 }

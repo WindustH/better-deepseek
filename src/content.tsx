@@ -2,8 +2,10 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import { SidebarAgents } from './components/SidebarAgents';
 import { AgentManager } from './lib/AgentManager';
+import { ToggleGuard } from './lib/ToggleGuard';
 
 AgentManager.getInstance();
+ToggleGuard.getInstance();
 
 const CONTAINER_ID = 'better-deepseek-agents-root';
 
