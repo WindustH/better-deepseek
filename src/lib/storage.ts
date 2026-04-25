@@ -49,8 +49,10 @@ export function subscribeToState(callback: (state: AppState) => void) {
         callback((changes[STORAGE_KEY].newValue as AppState) || DEFAULT_STATE);
       }
     } catch {
-      // Extension context invalidated — listener from old content script.
-      chrome.storage.onChanged.removeListener(listener);
+      // Only clean up if extension context is invalidated — not for callback bugs.
+      if (!chrome.runtime?.id) {
+        chrome.storage.onChanged.removeListener(listener);
+      }
     }
   };
   chrome.storage.onChanged.addListener(listener);

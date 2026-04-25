@@ -14,9 +14,15 @@ export const AgentModal: React.FC<AgentModalProps> = ({ agent, onClose, onSave }
   const [files, setFiles] = useState<AgentFile[]>(agent?.files || []);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     Array.from(e.target.files).forEach(file => {
+      if (file.size > MAX_FILE_SIZE) {
+        console.warn(`File "${file.name}" exceeds 10 MB limit, skipping`);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (ev) => {
         setFiles(prev => [...prev, {

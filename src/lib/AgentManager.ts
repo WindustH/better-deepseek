@@ -9,6 +9,9 @@ export class AgentManager {
   private localState: AppState = { agents: [], sessions: {}, activeAgentId: null };
   private filterRAF = 0;
   private isAutoFilling = false;
+  private initPromise: Promise<void>;
+  private urlPollTimer: ReturnType<typeof setInterval> | null = null;
+  private tempSidebarMo: MutationObserver | null = null;
 
   private sidebarContainer: HTMLElement | null = null;
   private cachedLinks: HTMLElement[] = [];
@@ -16,7 +19,7 @@ export class AgentManager {
   private filterDirty = true;
 
   private constructor() {
-    this.init();
+    this.initPromise = this.init();
   }
 
   static getInstance() {
@@ -30,7 +33,8 @@ export class AgentManager {
     try {
       this.localState = await loadState();
     } catch {
-      return;
+      // loadState handles errors internally; fall back to defaults
+      this.localState = { agents: [], sessions: {}, activeAgentId: null };
     }
     subscribeToState((newState) => {
       this.localState = newState;
@@ -65,10 +69,17 @@ export class AgentManager {
     };
 
     // Fallback — DeepSeek's SPA sometimes navigates without touching history API.
-    setInterval(checkUrl, 1500);
+    this.urlPollTimer = setInterval(() => {
+      if (!chrome.runtime?.id) {
+        if (this.urlPollTimer) { clearInterval(this.urlPollTimer); this.urlPollTimer = null; }
+        return;
+      }
+      checkUrl();
+    }, 1500);
   }
 
   private async handleUrlChange() {
+    await this.initPromise;
     const isNewChat = location.pathname === '/';
     const match = location.pathname.match(/\/a\/chat\/s\/([a-zA-Z0-9-]+)/);
     const sessionId = match ? match[1] : null;
@@ -110,6 +121,7 @@ export class AgentManager {
   }
 
   public async startAgentChat(agentId: string) {
+    await this.initPromise;
     this.localState.activeAgentId = agentId;
     await updateState(s => {
       s.activeAgentId = agentId;
@@ -130,6 +142,7 @@ export class AgentManager {
   }
 
   public async deactivateAgent() {
+    await this.initPromise;
     this.localState.activeAgentId = null;
     await updateState(s => {
       s.activeAgentId = null;
@@ -166,7 +179,12 @@ export class AgentManager {
     const wrapper = textarea ? this.getInputWrapper(textarea) : null;
     const fileArea = wrapper && textarea ? this.getFileArea(wrapper, textarea) : null;
     if (fileArea) {
-      fileArea.querySelectorAll<HTMLElement>('[tabindex="0"]').forEach(e => e.click());
+      try {
+        const closeButtons = fileArea.querySelectorAll<HTMLElement>(
+          'button, [role="button"], [tabindex="0"]'
+        );
+        closeButtons.forEach(e => { try { e.click(); } catch { /* ignore */ } });
+      } catch { /* DOM may have changed */ }
     }
   }
 
@@ -201,10 +219,9 @@ export class AgentManager {
 
       const wrapper = this.getInputWrapper(textarea);
       const fileArea = wrapper ? this.getFileArea(wrapper, textarea) : null;
-      const scopeText = fileArea?.textContent || '';
 
       for (const fileData of files) {
-        if (scopeText.includes(fileData.name)) continue;
+        if (fileArea?.textContent?.includes(fileData.name)) continue;
         const res = await fetch(fileData.dataURL);
         const blob = await res.blob();
         const file = new File([blob], fileData.name, { type: fileData.type });
@@ -265,17 +282,23 @@ export class AgentManager {
     if (container) {
       startObserving(container);
     } else {
-      const tempMo = new MutationObserver(() => {
+      this.tempSidebarMo = new MutationObserver(() => {
+        if (!chrome.runtime?.id) {
+          this.tempSidebarMo?.disconnect();
+          this.tempSidebarMo = null;
+          return;
+        }
         const c = findContainer();
         if (c) {
-          tempMo.disconnect();
+          this.tempSidebarMo?.disconnect();
+          this.tempSidebarMo = null;
           startObserving(c);
           this.filterDirty = true;
           this.scheduleFilterHistory();
         }
       });
-      tempMo.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => tempMo.disconnect(), 15000);
+      this.tempSidebarMo.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => { this.tempSidebarMo?.disconnect(); this.tempSidebarMo = null; }, 15000);
     }
   }
 

@@ -22,7 +22,7 @@ export const SidebarAgents: React.FC = () => {
 
   useEffect(() => {
     const closeMenu = (e: MouseEvent) => {
-      if ((e.target as HTMLElement).closest('.agent-context-menu')) return;
+      if ((e.target as Element).closest('.agent-context-menu')) return;
       setMenuOpenFor(null);
     };
     window.addEventListener('click', closeMenu);
@@ -50,7 +50,7 @@ export const SidebarAgents: React.FC = () => {
         const idx = s.agents.findIndex(a => a.id === editingAgent.id);
         if (idx !== -1) s.agents[idx] = { ...s.agents[idx], name, prompt, files };
       } else {
-        s.agents.push({ id: Date.now().toString(), name, prompt, files, lastUsed: Date.now() });
+        s.agents.push({ id: crypto.randomUUID(), name, prompt, files, lastUsed: Date.now() });
       }
       return s;
     });
