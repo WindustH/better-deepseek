@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Better DeepSeek",
   "version": "1.0.0",
-  "description": "Add Agents feature to chat.deepseek.com",
+  "description": "Enhance your DeepSeek chat experience",
   "action": {
     "default_popup": "index.html",
     "default_icon": {
