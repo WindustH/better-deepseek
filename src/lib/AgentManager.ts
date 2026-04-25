@@ -1,59 +1,6 @@
 import { loadState, updateState, subscribeToState } from './storage';
+import { waitForElement, waitForCondition } from './utils';
 import type { Agent, AppState } from './types';
-
-const waitForElement = <T extends HTMLElement>(
-  selector: string,
-  predicate?: (el: T) => boolean,
-  timeout = 10000
-): Promise<T | null> => {
-  const el = document.querySelector<T>(selector);
-  if (el && (!predicate || predicate(el))) return Promise.resolve(el);
-
-  return new Promise((resolve) => {
-    const deadline = Date.now() + timeout;
-    let resolved = false;
-
-    const check = () => {
-      if (resolved) return;
-      const el = document.querySelector<T>(selector);
-      if (el && (!predicate || predicate(el))) {
-        resolved = true;
-        mo.disconnect();
-        resolve(el);
-      } else if (Date.now() > deadline) {
-        resolved = true;
-        mo.disconnect();
-        resolve(null);
-      }
-    };
-
-    const mo = new MutationObserver(check);
-    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
-
-    const poll = () => {
-      if (resolved) return;
-      check();
-      if (!resolved) requestAnimationFrame(poll);
-    };
-    requestAnimationFrame(poll);
-  });
-};
-
-const waitForCondition = (
-  fn: () => boolean,
-  timeout = 10000
-): Promise<boolean> => {
-  if (fn()) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const deadline = Date.now() + timeout;
-    const check = () => {
-      if (fn()) { resolve(true); return; }
-      if (Date.now() > deadline) { resolve(false); return; }
-      requestAnimationFrame(check);
-    };
-    requestAnimationFrame(check);
-  });
-};
 
 export class AgentManager {
   private static instance: AgentManager;
@@ -65,7 +12,7 @@ export class AgentManager {
 
   private sidebarContainer: HTMLElement | null = null;
   private cachedLinks: HTMLElement[] = [];
-  private cachedGroups: HTMLElement[] = [];
+  private cachedGroups = new Set<HTMLElement>();
   private filterDirty = true;
 
   private constructor() {
@@ -93,65 +40,9 @@ export class AgentManager {
       this.filterDirty = true;
       this.scheduleFilterHistory();
     });
-    this.interceptFetch();
     this.interceptHistory();
     this.observeSidebar();
     this.handleUrlChange();
-  }
-
-  /**
-   * Intercept DeepSeek's fetch_page API to filter sessions at the source.
-   * When agent mode is active: only return sessions belonging to that agent.
-   * When no agent: exclude sessions belonging to any agent.
-   * This prevents DeepSeek from rendering hundreds of irrelevant DOM nodes.
-   */
-  private interceptFetch() {
-    const originalFetch = window.fetch.bind(window);
-
-    window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
-      const response = await originalFetch(...args);
-      const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url;
-
-      if (!url?.includes('chat_session/fetch_page')) {
-        return response;
-      }
-
-      const { activeAgentId, sessions } = this.localState;
-      if (!activeAgentId && Object.keys(sessions).length === 0) {
-        return response;
-      }
-
-      try {
-        const cloned = response.clone();
-        const json = await cloned.json();
-        const bizData = json.data?.biz_data;
-        if (!bizData?.chat_sessions) return new Response(JSON.stringify(json), { status: response.status, headers: response.headers });
-
-        const allAgentSessionIds = new Set(Object.keys(sessions));
-
-        if (activeAgentId) {
-          const agentSessionIds = new Set<string>();
-          for (const [sId, aId] of Object.entries(sessions)) {
-            if (aId === activeAgentId) agentSessionIds.add(sId);
-          }
-          const filtered = bizData.chat_sessions.filter(
-            (s: { id: string }) => agentSessionIds.has(s.id)
-          );
-          // Never return an empty list — causes DeepSeek to collapse the sidebar.
-          if (filtered.length > 0) {
-            bizData.chat_sessions = filtered;
-          }
-        } else {
-          bizData.chat_sessions = bizData.chat_sessions.filter(
-            (s: { id: string }) => !allAgentSessionIds.has(s.id)
-          );
-        }
-
-        return new Response(JSON.stringify(json), { status: response.status, headers: response.headers });
-      } catch {
-        return response;
-      }
-    };
   }
 
   private interceptHistory() {
@@ -175,6 +66,16 @@ export class AgentManager {
       origReplace(...args);
       checkUrl();
     };
+
+    // Poll for URL changes as a fallback — DeepSeek's SPA router sometimes
+    // navigates without touching history.pushState/replaceState.
+    const pollUrl = () => {
+      if (this.currentUrl !== location.href) {
+        this.currentUrl = location.href;
+        this.handleUrlChange();
+      }
+    };
+    setInterval(pollUrl, 250);
   }
 
   private async handleUrlChange() {
@@ -423,15 +324,14 @@ export class AgentManager {
     const links = scope.querySelectorAll('a[href*="/a/chat/s/"]');
 
     this.cachedLinks = [];
-    this.cachedGroups = [];
+    this.cachedGroups.clear();
 
     for (const link of links) {
       this.cachedLinks.push(link as HTMLElement);
 
       const parent = link.parentElement;
-      if (parent && !this.cachedGroups.includes(parent) &&
-        parent.children.length > 1) {
-        this.cachedGroups.push(parent);
+      if (parent && parent.children.length > 1) {
+        this.cachedGroups.add(parent);
       }
     }
 
@@ -457,23 +357,6 @@ export class AgentManager {
       }
     }
 
-    // Agent has no sessions yet — unhide everything to prevent empty sidebar
-    // which triggers DeepSeek's sidebar collapse.
-    if (activeAgentId && currentAgentSessionIds.size === 0) {
-      for (const link of this.cachedLinks) {
-        if (link.style.display === 'none') {
-          link.style.display = '';
-          link.classList.remove('agent-hidden');
-        }
-      }
-      for (const container of this.cachedGroups) {
-        if (container.style.display === 'none') {
-          container.style.display = '';
-        }
-      }
-      return;
-    }
-
     const groupVisibleCounts = new Map<HTMLElement, number>();
 
     for (const link of this.cachedLinks) {
@@ -493,7 +376,7 @@ export class AgentManager {
 
       if (isVisible) {
         const parent = link.parentElement;
-        if (parent && this.cachedGroups.includes(parent)) {
+        if (parent && this.cachedGroups.has(parent)) {
           groupVisibleCounts.set(parent, (groupVisibleCounts.get(parent) || 0) + 1);
         }
       }

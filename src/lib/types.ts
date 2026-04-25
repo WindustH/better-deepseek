@@ -4,7 +4,6 @@ export interface Agent {
   prompt: string;
   files: AgentFile[];
   lastUsed: number;
-  icon?: string;
 }
 
 export interface AgentFile {
