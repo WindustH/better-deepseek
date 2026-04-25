@@ -13,6 +13,8 @@ export interface AgentFile {
 }
 
 export interface TogglePreferences {
+  smartSearchEnabled: boolean;
+  fastModeEnabled: boolean;
   smartSearch: boolean;
   fastMode: boolean;
 }

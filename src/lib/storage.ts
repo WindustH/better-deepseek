@@ -1,5 +1,12 @@
 import type { AppState } from './types';
 
+export interface ExportData {
+  version: 1;
+  agents: AppState['agents'];
+  sessions: AppState['sessions'];
+  togglePrefs?: AppState['togglePrefs'];
+}
+
 const STORAGE_KEY = 'better_deepseek_state';
 
 const DEFAULT_STATE: AppState = {
@@ -63,4 +70,31 @@ export function subscribeToState(callback: (state: AppState) => void) {
       // Already removed or context invalidated.
     }
   };
+}
+
+export async function exportData(): Promise<string> {
+  const state = await loadState();
+  const data: ExportData = {
+    version: 1,
+    agents: state.agents,
+    sessions: state.sessions,
+    togglePrefs: state.togglePrefs,
+  };
+  return JSON.stringify(data, null, 2);
+}
+
+export async function importData(json: string): Promise<boolean> {
+  try {
+    const data = JSON.parse(json) as ExportData;
+    if (data.version !== 1 || !Array.isArray(data.agents)) return false;
+    await saveState({
+      agents: data.agents,
+      sessions: data.sessions || {},
+      activeAgentId: null,
+      togglePrefs: data.togglePrefs,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }

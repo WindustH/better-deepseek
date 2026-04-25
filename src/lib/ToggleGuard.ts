@@ -56,17 +56,15 @@ export class ToggleGuard {
     if (!searchToggle) return;
 
     // Restore once on init
-    if (this.prefs) {
-      this.restoreSmartSearch(searchToggle);
-      this.restoreFastMode();
-    }
+    this.restoreSmartSearch(searchToggle);
+    this.restoreFastMode();
 
     this.observeSearchToggle(searchToggle);
     this.observeRadios();
   }
 
   private restoreSmartSearch(el: HTMLElement) {
-    if (!this.prefs) return;
+    if (!this.prefs?.smartSearchEnabled) return;
     const current = el.classList.contains('ds-toggle-button--selected');
     if (current !== this.prefs.smartSearch) {
       this.userActionUntil = Date.now() + 500;
@@ -75,7 +73,7 @@ export class ToggleGuard {
   }
 
   private restoreFastMode() {
-    if (!this.prefs) return;
+    if (!this.prefs?.fastModeEnabled) return;
     const target = this.prefs.fastMode ? 'default' : 'expert';
     const radio = document.querySelector<HTMLElement>(
       `[role="radio"][data-model-type="${target}"]`
@@ -86,7 +84,6 @@ export class ToggleGuard {
   }
 
   private observeSearchToggle(el: HTMLElement) {
-    // Click listener: mark timestamp so MutationObserver knows it's a user action
     el.addEventListener('click', () => {
       this.userActionUntil = Date.now() + 500;
       requestAnimationFrame(() => {
@@ -96,9 +93,8 @@ export class ToggleGuard {
       });
     });
 
-    // MutationObserver: detect page auto-toggles and restore
     const mo = new MutationObserver(() => {
-      if (Date.now() < this.userActionUntil || !this.prefs) return;
+      if (Date.now() < this.userActionUntil || !this.prefs?.smartSearchEnabled) return;
       const current = el.classList.contains('ds-toggle-button--selected');
       if (current !== this.prefs.smartSearch) {
         this.userActionUntil = Date.now() + 500;
@@ -113,9 +109,8 @@ export class ToggleGuard {
     const radioGroup = document.querySelector('[role="radiogroup"]');
     if (!radioGroup) return;
 
-    // Observe the radiogroup container (survives child re-renders via subtree)
     const mo = new MutationObserver(() => {
-      if (Date.now() < this.userActionUntil || !this.prefs) return;
+      if (Date.now() < this.userActionUntil || !this.prefs?.fastModeEnabled) return;
       const fastRadio = radioGroup.querySelector('[data-model-type="default"]');
       if (!fastRadio) return;
       const isFast = fastRadio.getAttribute('aria-checked') === 'true';
@@ -135,7 +130,12 @@ export class ToggleGuard {
   private savePref<K extends keyof TogglePreferences>(key: K, value: TogglePreferences[K]) {
     updateState(s => {
       if (!s.togglePrefs) {
-        s.togglePrefs = { smartSearch: true, fastMode: true };
+        s.togglePrefs = {
+          smartSearchEnabled: true,
+          fastModeEnabled: true,
+          smartSearch: true,
+          fastMode: true,
+        };
       }
       s.togglePrefs[key] = value;
       return s;
