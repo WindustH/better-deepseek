@@ -9,27 +9,56 @@ const DEFAULT_STATE: AppState = {
 };
 
 export async function loadState(): Promise<AppState> {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  return (result[STORAGE_KEY] as AppState) || DEFAULT_STATE;
+  try {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    return (result[STORAGE_KEY] as AppState) || DEFAULT_STATE;
+  } catch {
+    return DEFAULT_STATE;
+  }
 }
 
 export async function saveState(state: AppState): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY]: state });
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY]: state });
+  } catch {
+    // Extension context invalidated — ignore.
+  }
 }
 
+let updateQueue: Promise<unknown> = Promise.resolve();
+
 export async function updateState(updater: (state: AppState) => AppState): Promise<AppState> {
-  const state = await loadState();
-  const newState = updater(state);
-  await saveState(newState);
-  return newState;
+  const task = updateQueue.then(async () => {
+    const state = await loadState();
+    const newState = updater(state);
+    await saveState(newState);
+    return newState;
+  });
+  updateQueue = task.catch(() => {});
+  try {
+    return await task;
+  } catch {
+    return DEFAULT_STATE;
+  }
 }
 
 export function subscribeToState(callback: (state: AppState) => void) {
   const listener = (changes: { [key: string]: chrome.storage.StorageChange }) => {
-    if (changes[STORAGE_KEY]) {
-      callback((changes[STORAGE_KEY].newValue as AppState) || DEFAULT_STATE);
+    try {
+      if (changes[STORAGE_KEY]) {
+        callback((changes[STORAGE_KEY].newValue as AppState) || DEFAULT_STATE);
+      }
+    } catch {
+      // Extension context invalidated — listener from old content script.
+      chrome.storage.onChanged.removeListener(listener);
     }
   };
   chrome.storage.onChanged.addListener(listener);
-  return () => chrome.storage.onChanged.removeListener(listener);
+  return () => {
+    try {
+      chrome.storage.onChanged.removeListener(listener);
+    } catch {
+      // Already removed or context invalidated.
+    }
+  };
 }

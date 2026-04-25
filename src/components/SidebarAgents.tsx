@@ -43,7 +43,10 @@ export const SidebarAgents: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const closeMenu = () => setMenuOpenFor(null);
+    const closeMenu = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('.agent-context-menu')) return;
+      setMenuOpenFor(null);
+    };
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, []);
@@ -112,6 +115,9 @@ export const SidebarAgents: React.FC = () => {
       await updateState(s => {
         s.agents = s.agents.filter(a => a.id !== agentToDelete);
         if (s.activeAgentId === agentToDelete) s.activeAgentId = null;
+        for (const [sid, aid] of Object.entries(s.sessions)) {
+          if (aid === agentToDelete) delete s.sessions[sid];
+        }
         return s;
       });
       setAgentToDelete(null);
@@ -217,8 +223,8 @@ export const SidebarAgents: React.FC = () => {
                 </div>
 
                 {menuOpenFor === agent.id && (
-                  <div 
-                    className="absolute right-2 top-8 bg-white dark:bg-[#2c2c2c] border border-black/10 dark:border-white/10 rounded-lg shadow-xl z-50 overflow-hidden flex flex-col py-1 min-w-[120px]"
+                  <div
+                    className="agent-context-menu absolute right-2 top-8 bg-white dark:bg-[#2c2c2c] border border-black/10 dark:border-white/10 rounded-lg shadow-xl z-50 overflow-hidden flex flex-col py-1 min-w-[120px]"
                     onClick={(e) => e.stopPropagation()}
                   >
                     <button onClick={(e) => { e.stopPropagation(); openEditModal(agent); }} className="px-4 py-2 text-sm text-left text-black/80 dark:text-white/80 hover:bg-black/5 dark:hover:bg-white/5 transition-colors">{t.edit}</button>

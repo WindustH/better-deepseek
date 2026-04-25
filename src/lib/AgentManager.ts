@@ -11,17 +11,31 @@ const waitForElement = <T extends HTMLElement>(
 
   return new Promise((resolve) => {
     const deadline = Date.now() + timeout;
-    const mo = new MutationObserver(() => {
+    let resolved = false;
+
+    const check = () => {
+      if (resolved) return;
       const el = document.querySelector<T>(selector);
       if (el && (!predicate || predicate(el))) {
+        resolved = true;
         mo.disconnect();
         resolve(el);
       } else if (Date.now() > deadline) {
+        resolved = true;
         mo.disconnect();
         resolve(null);
       }
-    });
-    mo.observe(document.body, { childList: true, subtree: true });
+    };
+
+    const mo = new MutationObserver(check);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+
+    const poll = () => {
+      if (resolved) return;
+      check();
+      if (!resolved) requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
   });
 };
 
@@ -66,7 +80,14 @@ export class AgentManager {
   }
 
   private async init() {
-    this.localState = await loadState();
+    try {
+      this.localState = await loadState();
+    } catch (e) {
+      // Extension context invalidated — content script from a previous
+      // extension version, nothing to do.
+      console.log('[AgentManager] init failed, extension context likely invalidated');
+      return;
+    }
     subscribeToState((newState) => {
       this.localState = newState;
       this.filterDirty = true;
@@ -101,7 +122,8 @@ export class AgentManager {
       }
 
       try {
-        const json = await response.json();
+        const cloned = response.clone();
+        const json = await cloned.json();
         const bizData = json.data?.biz_data;
         if (!bizData?.chat_sessions) return new Response(JSON.stringify(json), { status: response.status, headers: response.headers });
 
@@ -112,9 +134,13 @@ export class AgentManager {
           for (const [sId, aId] of Object.entries(sessions)) {
             if (aId === activeAgentId) agentSessionIds.add(sId);
           }
-          bizData.chat_sessions = bizData.chat_sessions.filter(
+          const filtered = bizData.chat_sessions.filter(
             (s: { id: string }) => agentSessionIds.has(s.id)
           );
+          // Never return an empty list — causes DeepSeek to collapse the sidebar.
+          if (filtered.length > 0) {
+            bizData.chat_sessions = filtered;
+          }
         } else {
           bizData.chat_sessions = bizData.chat_sessions.filter(
             (s: { id: string }) => !allAgentSessionIds.has(s.id)
@@ -165,10 +191,16 @@ export class AgentManager {
       }
     } else if (sessionId && this.localState.activeAgentId) {
       if (this.localState.sessions[sessionId] !== this.localState.activeAgentId) {
-        await updateState(s => {
+        // Update local state synchronously so filterHistoryDOM sees the new
+        // session immediately — prevents a flash where all links are hidden.
+        this.localState.sessions[sessionId] = this.localState.activeAgentId;
+        this.filterDirty = true;
+        this.scheduleFilterHistory();
+        updateState(s => {
           s.sessions[sessionId] = this.localState.activeAgentId!;
           return s;
         });
+        return;
       }
     }
 
@@ -177,15 +209,17 @@ export class AgentManager {
   }
 
   private clickNewChatOrRedirect() {
+    if (location.pathname === '/') return;
+    // Prefer clicking DeepSeek's own button so sidebar state is preserved.
     const newChatBtn = document.evaluate(
       '//div[contains(text(), "开启新对话") or contains(text(), "New chat")]',
       document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
     ).singleNodeValue as HTMLElement;
-
     if (newChatBtn) {
       newChatBtn.click();
     } else {
-      location.href = '/';
+      history.pushState(null, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
     }
   }
 
@@ -200,10 +234,17 @@ export class AgentManager {
 
     if (location.pathname !== '/') {
       this.clickNewChatOrRedirect();
-    } else {
-      const agent = this.localState.agents.find(a => a.id === agentId);
-      if (agent) this.autoFillAndSend(agent);
+      return;
     }
+
+    // Clear any stale state from a previous session, then wait for the DOM to
+    // settle before auto-filling.
+    this.clearInputArea();
+    await new Promise(r => requestAnimationFrame(r));
+    await new Promise(r => requestAnimationFrame(r));
+
+    const agent = this.localState.agents.find(a => a.id === agentId);
+    if (agent) this.autoFillAndSend(agent);
   }
 
   public async deactivateAgent() {
@@ -213,9 +254,34 @@ export class AgentManager {
       return s;
     });
 
+    this.clearInputArea();
     this.clickNewChatOrRedirect();
     this.filterDirty = true;
     this.scheduleFilterHistory();
+  }
+
+  private clearInputArea() {
+    const textarea = document.querySelector<HTMLTextAreaElement>('textarea');
+    if (textarea) {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      )?.set;
+      nativeSetter?.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Walk up 3 levels to the input wrapper.
+    // The file area is the dynamic firstChild — only present when files exist.
+    // When no files: firstChild is the input container (contains textarea).
+    let el: HTMLElement | null = textarea ?? null;
+    for (let i = 0; el && i < 3; i++) {
+      el = el.parentElement;
+    }
+    const firstChild = el?.firstElementChild as HTMLElement | null;
+    // Only target the file area (firstChild that does NOT contain the textarea)
+    if (firstChild && textarea && !firstChild.contains(textarea)) {
+      firstChild.querySelectorAll<HTMLElement>('[tabindex="0"]').forEach(e => e.click());
+    }
   }
 
   private async autoFillAndSend(agent: Agent) {
@@ -235,7 +301,7 @@ export class AgentManager {
         await waitForCondition(() => !textarea.disabled, 5000);
       }
 
-      this.injectPrompt(textarea, agent);
+      await this.injectPrompt(textarea, agent);
     } finally {
       this.isAutoFilling = false;
     }
@@ -247,10 +313,18 @@ export class AgentManager {
       const dataTransfer = new DataTransfer();
       let addedFiles = 0;
 
-      const containerText = textarea.closest('div.flex')?.parentElement?.textContent || '';
+      // Walk up 3 levels to the input wrapper.
+      let wrapper: HTMLElement | null = textarea;
+      for (let i = 0; wrapper && i < 3; i++) {
+        wrapper = wrapper.parentElement;
+      }
+      // The file area is the dynamic firstChild — only present when files exist.
+      const firstChild = wrapper?.firstElementChild as HTMLElement | null;
+      const fileArea = (firstChild && !firstChild.contains(textarea)) ? firstChild : null;
+      const scopeText = fileArea?.textContent || '';
 
       for (const fileData of files) {
-        if (containerText.includes(fileData.name)) {
+        if (scopeText.includes(fileData.name)) {
           console.log(`File ${fileData.name} seems already attached, skipping.`);
           continue;
         }
@@ -262,7 +336,8 @@ export class AgentManager {
       }
 
       if (addedFiles > 0) {
-        const dropTarget = textarea.closest('div.flex') || document.body;
+        // Drop on the file area if present, otherwise on the wrapper itself.
+        const dropTarget = fileArea || wrapper || document.body;
         const dropEvent = new DragEvent('drop', {
           bubbles: true,
           cancelable: true,
@@ -275,32 +350,13 @@ export class AgentManager {
     }
   }
 
-  private injectPrompt(textarea: HTMLTextAreaElement, agent: Agent) {
+  private async injectPrompt(textarea: HTMLTextAreaElement, agent: Agent) {
     const finalPrompt = agent.prompt || '';
 
     if (finalPrompt) {
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
       nativeInputValueSetter?.call(textarea, finalPrompt);
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-
-    const tryClickSend = () => {
-      const wrapper = textarea.closest('div:has(> div > textarea)');
-      if (wrapper) {
-        const btn = wrapper.querySelector('div[cursor="pointer"]:last-child') as HTMLElement;
-        if (btn && !btn.hasAttribute('disabled')) { btn.click(); return true; }
-      }
-      const possibleBtn = document.querySelector('div.send-button, div[aria-label="Send message"]') as HTMLElement;
-      if (possibleBtn && !possibleBtn.hasAttribute('disabled')) { possibleBtn.click(); return true; }
-      return false;
-    };
-
-    if (!tryClickSend()) {
-      waitForElement<HTMLElement>(
-        'div[cursor="pointer"]:last-child, div.send-button, div[aria-label="Send message"]',
-        el => !el.hasAttribute('disabled'),
-        5000
-      ).then(el => el?.click());
     }
   }
 
@@ -374,7 +430,7 @@ export class AgentManager {
 
       const parent = link.parentElement;
       if (parent && !this.cachedGroups.includes(parent) &&
-        Array.from(parent.children).some(c => c.tagName === 'DIV')) {
+        parent.children.length > 1) {
         this.cachedGroups.push(parent);
       }
     }
@@ -399,6 +455,23 @@ export class AgentManager {
       for (const [sId, aId] of Object.entries(sessions)) {
         if (aId === activeAgentId) currentAgentSessionIds.add(sId);
       }
+    }
+
+    // Agent has no sessions yet — unhide everything to prevent empty sidebar
+    // which triggers DeepSeek's sidebar collapse.
+    if (activeAgentId && currentAgentSessionIds.size === 0) {
+      for (const link of this.cachedLinks) {
+        if (link.style.display === 'none') {
+          link.style.display = '';
+          link.classList.remove('agent-hidden');
+        }
+      }
+      for (const container of this.cachedGroups) {
+        if (container.style.display === 'none') {
+          container.style.display = '';
+        }
+      }
+      return;
     }
 
     const groupVisibleCounts = new Map<HTMLElement, number>();
